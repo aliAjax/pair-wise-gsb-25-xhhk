@@ -1,158 +1,262 @@
+import { useMemo, useRef, useState } from "react";
 import "./styles.css";
+import { useStore } from "./data/useStore";
+import { MetricBar } from "./components/MetricBar";
+import { FilterSidebar } from "./components/FilterSidebar";
+import { VisitForm } from "./components/VisitForm";
+import { RecordTable } from "./components/RecordTable";
+import { ScheduleBoard } from "./components/ScheduleBoard";
+import type { RecordFilters } from "./types";
+import { applyFilters, summarize } from "./domain/rules";
 
-const project = {
-  "id": "hxwl-11",
-  "port": 5111,
-  "title": "眼科验光记录",
-  "subtitle": "视力、屈光参数与复查处方对比",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#2563eb",
-    "#059669",
-    "#dc2626"
-  ],
-  "domain": "眼视光",
-  "users": [
-    "验光师",
-    "门店顾问",
-    "复查医生"
-  ],
-  "metrics": [
-    "近视进展",
-    "散光变化",
-    "复查提醒",
-    "处方数量"
-  ],
-  "filters": [
-    "儿童",
-    "成人",
-    "渐进片",
-    "角膜塑形镜"
-  ],
-  "fields": [
-    "裸眼视力",
-    "矫正视力",
-    "球镜",
-    "柱镜",
-    "轴位",
-    "瞳距",
-    "角膜曲率"
-  ],
-  "records": [
-    [
-      "Patient-032",
-      "儿童近视",
-      "复查",
-      "右眼-2.75DS，轴位180"
-    ],
-    [
-      "Patient-081",
-      "渐进片",
-      "初配",
-      "ADD +1.50，瞳高待确认"
-    ],
-    [
-      "Patient-144",
-      "散光",
-      "复查",
-      "柱镜变化0.50D"
-    ]
-  ]
-};
+type Tab = "records" | "schedule";
 
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
+interface Toast {
+  id: number;
+  msg: string;
+  kind: "ok" | "err";
 }
 
+const DEFAULT_FILTERS: RecordFilters = {
+  query: "",
+  eye: "all",
+  status: "all",
+  stage: "all",
+  risk: "all",
+};
+
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const store = useStore();
+  const [tab, setTab] = useState<Tab>("records");
+  const [filters, setFilters] = useState<RecordFilters>(DEFAULT_FILTERS);
+  const [metricActive, setMetricActive] = useState("all");
+  const [operator, setOperator] = useState(
+    () => localStorage.getItem("kc-operator") ?? ""
+  );
+  const [isSpecialist, setIsSpecialist] = useState(
+    () => localStorage.getItem("kc-specialist") === "1"
+  );
+  const [preselectRecordId, setPreselectRecordId] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const toastSeq = useRef(0);
+
+  const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const summary = useMemo(
+    () => summarize(store.records, today),
+    [store.records, today]
+  );
+
+  const effectiveFilters = useMemo<RecordFilters>(() => {
+    // 顶部指标卡片联动状态筛选
+    if (metricActive === "all" || metricActive === "scheduled") return filters;
+    return { ...filters, status: metricActive as RecordFilters["status"] };
+  }, [filters, metricActive]);
+
+  const visibleRecords = useMemo(
+    () => applyFilters(store.records, effectiveFilters),
+    [store.records, effectiveFilters]
+  );
+
+  // 「已排设备」指标：列表只显示有排程的记录
+  const shownRecords = useMemo(() => {
+    if (metricActive === "scheduled") {
+      return visibleRecords.filter((r) => r.schedules.length > 0);
+    }
+    return visibleRecords;
+  }, [visibleRecords, metricActive]);
+
+  function pushToast(msg: string, kind: "ok" | "err" = "ok") {
+    const id = ++toastSeq.current;
+    setToasts((t) => [...t, { id, msg, kind }]);
+    window.setTimeout(() => {
+      setToasts((t) => t.filter((x) => x.id !== id));
+    }, 4200);
+  }
+
+  function onMetric(key: string) {
+    setMetricActive(key);
+    if (key === "scheduled") {
+      setTab("schedule");
+    } else {
+      setTab("records");
+      if (key !== "all") {
+        setFilters((f) => ({
+          ...f,
+          status: key as RecordFilters["status"],
+        }));
+      } else {
+        setFilters((f) => ({ ...f, status: "all" }));
+      }
+    }
+  }
+
+  function saveOperator(name: string) {
+    setOperator(name);
+    localStorage.setItem("kc-operator", name);
+  }
+
+  function toggleSpecialist(v: boolean) {
+    setIsSpecialist(v);
+    localStorage.setItem("kc-specialist", v ? "1" : "0");
+  }
+
+  function goSchedule(recordId: string) {
+    setPreselectRecordId(recordId);
+    setTab("schedule");
+  }
+
+  function handleExport() {
+    const blob = new Blob([store.exportText()], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `keratoconus-followup-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    pushToast("数据已导出为 JSON 备份", "ok");
+  }
+
+  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        store.importText(String(reader.result));
+        pushToast("备份已导入，记录、排程与版本链均已恢复", "ok");
+      } catch (err) {
+        pushToast(err instanceof Error ? err.message : "导入失败", "err");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  function handleClear() {
+    if (
+      window.confirm(
+        "确定清空全部随访记录、设备占用与版本链？此操作不可恢复（建议先导出备份）。"
+      )
+    ) {
+      store.clearAll();
+      pushToast("已清空全部数据", "ok");
+    }
+  }
 
   return (
     <main className="app-shell">
-      <section className="hero">
+      <header className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">圆锥角膜随访台 · 交联设备排程</p>
+          <h1>角膜塑形进展随访工作台</h1>
+          <p className="subtitle">
+            录入最薄点、Kmax、半年变化量与治疗阶段；自动判定转专科阈值，
+            确认后检查与排程锁定，复诊参数变化生成带原因的版本链。
+          </p>
         </div>
-        <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+        <div className="operator-card">
+          <label>
+            <span>当前操作员</span>
+            <input
+              value={operator}
+              placeholder="姓名 / 工号"
+              onChange={(e) => saveOperator(e.target.value)}
+            />
+          </label>
+          <label className="specialist-toggle">
+            <input
+              type="checkbox"
+              checked={isSpecialist}
+              onChange={(e) => toggleSpecialist(e.target.checked)}
+            />
+            <span>我是专科医师（可确认转专科记录）</span>
+          </label>
         </div>
-      </section>
+      </header>
 
-      <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
+      <MetricBar summary={summary} onSelect={onMetric} active={metricActive} />
+
+      <nav className="tabs">
+        <button
+          type="button"
+          className={tab === "records" ? "tab on" : "tab"}
+          onClick={() => setTab("records")}
+        >
+          随访记录
+        </button>
+        <button
+          type="button"
+          className={tab === "schedule" ? "tab on" : "tab"}
+          onClick={() => setTab("schedule")}
+        >
+          交联设备排程
+        </button>
+        <div className="tab-tools">
+          <button type="button" onClick={handleExport}>
+            导出备份
+          </button>
+          <button type="button" onClick={() => fileRef.current?.click()}>
+            导入备份
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={handleImportFile}
+          />
+          <button type="button" className="danger-outline" onClick={handleClear}>
+            清空数据
+          </button>
+        </div>
+      </nav>
+
+      {tab === "records" ? (
+        <div className="workspace">
+          <FilterSidebar
+            filters={filters}
+            onChange={(f) => {
+              setFilters(f);
+              setMetricActive("all");
+            }}
+          />
+          <div className="main-col">
+            <VisitForm store={store} onToast={pushToast} />
+            <RecordTable
+              records={shownRecords}
+              store={store}
+              operator={operator}
+              isSpecialist={isSpecialist}
+              onToast={pushToast}
+              onGoSchedule={goSchedule}
+            />
+          </div>
+        </div>
+      ) : (
+        <ScheduleBoard
+          store={store}
+          operator={operator}
+          preselectRecordId={preselectRecordId}
+          onConsumePreselect={() => setPreselectRecordId(null)}
+          onToast={pushToast}
+        />
+      )}
+
+      <footer className="page-foot">
+        数据仅保存在本机浏览器（localStorage）：关闭重开后记录、设备占用与版本链仍在。
+        判定阈值：最薄点 &lt; 400μm 或半年变化 &gt; 25μm 即转专科，且不可占用交联设备。
+      </footer>
+
+      <div className="toast-stack">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast toast-${t.kind}`}>
+            {t.msg}
+          </div>
         ))}
-      </section>
-
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      </div>
     </main>
   );
 }
